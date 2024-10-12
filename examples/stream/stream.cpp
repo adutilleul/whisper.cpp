@@ -6,13 +6,19 @@
 #include "common.h"
 #include "whisper.h"
 
+#include <iconv.h>
 #include <cassert>
 #include <cstdio>
 #include <string>
 #include <thread>
 #include <vector>
+#include <tuple>
 #include <fstream>
+#include <librdkafka/rdkafka.h>
 
+#include "json.hpp"
+
+using json = nlohmann::json;
 
 // command-line parameters
 struct whisper_params {
@@ -112,6 +118,48 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "\n");
 }
 
+std::tuple<rd_kafka_t*, rd_kafka_topic_conf_t*> setup_kafka_procuder(const char* bootstrap_servers) {
+    char hostname[128];
+    char errstr[512];
+
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+
+    if (gethostname(hostname, sizeof(hostname))) {
+        fprintf(stderr, "%% Failed to lookup hostname\n");
+        exit(1);
+    }
+
+    if (rd_kafka_conf_set(conf, "client.id", hostname,
+                        errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+        fprintf(stderr, "%% %s\n", errstr);
+        exit(1);
+    }
+
+    if (rd_kafka_conf_set(conf, "bootstrap.servers", bootstrap_servers,
+                        errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+        fprintf(stderr, "%% %s\n", errstr);
+        exit(1);
+    }
+
+    rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
+
+    if (rd_kafka_topic_conf_set(topic_conf, "acks", "all",
+                        errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+        fprintf(stderr, "%% %s\n", errstr);
+        exit(1);
+    }
+
+    /* Create Kafka producer handle */
+    rd_kafka_t *rk;
+    if (!(rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                            errstr, sizeof(errstr)))) {
+        fprintf(stderr, "%% Failed to create new producer: %s\n", errstr);
+        exit(1);
+    }
+
+    return std::make_tuple(rk, topic_conf);
+}
+
 int main(int argc, char ** argv) {
     whisper_params params;
 
@@ -164,6 +212,11 @@ int main(int argc, char ** argv) {
     std::vector<float> pcmf32_new(n_samples_30s, 0.0f);
 
     std::vector<whisper_token> prompt_tokens;
+
+    std::string topic = "test";
+
+    auto [rk, topic_conf] = setup_kafka_procuder("crolard.fr:9092");
+    rd_kafka_topic_t *rkt = rd_kafka_topic_new(rk, topic.c_str(), topic_conf);
 
     // print some info about the processing
     {
@@ -352,6 +405,33 @@ int main(int argc, char ** argv) {
                         printf("%s", text);
                         fflush(stdout);
 
+                        const std::string text_str = text;
+                        std::string utf8_text = text_str;
+
+                        char hostname[128];
+                        gethostname(hostname, sizeof(hostname));
+
+                        std::string hostname_str = hostname;
+
+                        json j;
+                        j["hostname"] = hostname_str;
+                        j["location"] = "Crolard Office";
+                        j["timestamp"] = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+                        j["text"] = utf8_text;
+
+                        // dump to utf-8
+                        std::string json_str = j.dump();
+
+                        const std::string key = "test";
+
+                        if (rd_kafka_produce(rkt, RD_KAFKA_PARTITION_UA,
+                                            RD_KAFKA_MSG_F_COPY,
+                                (void*)json_str.c_str(), json_str.size(),
+                                            key.c_str(), key.size(),
+                        NULL) == -1) {
+                            printf("Error\n");
+                        }
+
                         if (params.fname_out.length() > 0) {
                             fout << text;
                         }
@@ -412,6 +492,9 @@ int main(int argc, char ** argv) {
     }
 
     audio.pause();
+
+    rd_kafka_topic_destroy(rkt);
+    rd_kafka_destroy(rk);
 
     whisper_print_timings(ctx);
     whisper_free(ctx);
