@@ -309,6 +309,8 @@ int main(int argc, char ** argv) {
                 continue;
             }
 
+            audio.get(2000, pcmf32_new);
+
             // audio.get(TotalSamples, pcmf32_new);
 
             // std::vector<int16_t> pcmi16(pcmf32_new.size());
