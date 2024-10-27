@@ -6,6 +6,7 @@
 #include "common.h"
 #include "whisper.h"
 
+#include <iostream>
 #include <iconv.h>
 #include <cassert>
 #include <cstdio>
@@ -14,11 +15,10 @@
 #include <vector>
 #include <tuple>
 #include <fstream>
-#include <librdkafka/rdkafka.h>
 
-#include "json.hpp"
+#include "protocol.hpp"
 
-using json = nlohmann::json;
+#include "fvad.h"
 
 // command-line parameters
 struct whisper_params {
@@ -42,9 +42,12 @@ struct whisper_params {
     bool save_audio    = false; // save audio to wav file
     bool use_gpu       = true;
     bool flash_attn    = false;
+    bool remote        = false;
 
     std::string language  = "en";
     std::string model     = "models/ggml-base.en.bin";
+    std::string bootstrap_servers = DEFAULT_BOOTSTRAP_SERVERS;
+    std::string topic = DEFAULT_KAFKA_TOPIC;
     std::string fname_out;
 };
 
@@ -74,6 +77,9 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-l"    || arg == "--language")      { params.language      = argv[++i]; }
         else if (arg == "-m"    || arg == "--model")         { params.model         = argv[++i]; }
         else if (arg == "-f"    || arg == "--file")          { params.fname_out     = argv[++i]; }
+        else if (arg == "-rm"   || arg == "--remote")        { params.remote        = true; }
+        else if (arg == "-bs"   || arg == "--bootstrap-servers") { params.bootstrap_servers = argv[++i]; }
+        else if (arg == "-tpc"  || arg == "--topic")         { params.topic         = argv[++i]; }
         else if (arg == "-tdrz" || arg == "--tinydiarize")   { params.tinydiarize   = true; }
         else if (arg == "-sa"   || arg == "--save-audio")    { params.save_audio    = true; }
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
@@ -118,54 +124,15 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "\n");
 }
 
-std::tuple<rd_kafka_t*, rd_kafka_topic_conf_t*> setup_kafka_procuder(const char* bootstrap_servers) {
-    char hostname[128];
-    char errstr[512];
-
-    rd_kafka_conf_t *conf = rd_kafka_conf_new();
-
-    if (gethostname(hostname, sizeof(hostname))) {
-        fprintf(stderr, "%% Failed to lookup hostname\n");
-        exit(1);
-    }
-
-    if (rd_kafka_conf_set(conf, "client.id", hostname,
-                        errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
-        fprintf(stderr, "%% %s\n", errstr);
-        exit(1);
-    }
-
-    if (rd_kafka_conf_set(conf, "bootstrap.servers", bootstrap_servers,
-                        errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
-        fprintf(stderr, "%% %s\n", errstr);
-        exit(1);
-    }
-
-    rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
-
-    if (rd_kafka_topic_conf_set(topic_conf, "acks", "all",
-                        errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
-        fprintf(stderr, "%% %s\n", errstr);
-        exit(1);
-    }
-
-    /* Create Kafka producer handle */
-    rd_kafka_t *rk;
-    if (!(rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
-                            errstr, sizeof(errstr)))) {
-        fprintf(stderr, "%% Failed to create new producer: %s\n", errstr);
-        exit(1);
-    }
-
-    return std::make_tuple(rk, topic_conf);
-}
-
 int main(int argc, char ** argv) {
     whisper_params params;
 
     if (whisper_params_parse(argc, argv, params) == false) {
         return 1;
     }
+
+    Fvad* vad = fvad_new();
+    fvad_set_sample_rate(vad, WHISPER_SAMPLE_RATE);
 
     params.keep_ms   = std::min(params.keep_ms,   params.step_ms);
     params.length_ms = std::max(params.length_ms, params.step_ms);
@@ -176,6 +143,8 @@ int main(int argc, char ** argv) {
     const int n_samples_30s  = (1e-3*30000.0         )*WHISPER_SAMPLE_RATE;
 
     const bool use_vad = n_samples_step <= 0; // sliding window mode uses VAD
+
+    printf("Use VAD: %d\n", use_vad);
 
     const int n_new_line = !use_vad ? std::max(1, params.length_ms / params.step_ms - 1) : 1; // number of steps to print new line
 
@@ -213,10 +182,10 @@ int main(int argc, char ** argv) {
 
     std::vector<whisper_token> prompt_tokens;
 
-    std::string topic = "test";
-
-    auto [rk, topic_conf] = setup_kafka_procuder("crolard.fr:9092");
-    rd_kafka_topic_t *rkt = rd_kafka_topic_new(rk, topic.c_str(), topic_conf);
+    RdKafka::Producer* producer = nullptr;
+    if(params.remote) {
+        producer = setup_kafka_producer(params.bootstrap_servers.c_str());
+    }
 
     // print some info about the processing
     {
@@ -330,13 +299,42 @@ int main(int argc, char ** argv) {
             const auto t_now  = std::chrono::high_resolution_clock::now();
             const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
 
+            // int32_t ValidLength = 30;
+            // int32_t NumToProcess = ValidLength * WHISPER_SAMPLE_RATE / 1000;
+            // int32_t TotalSamples = NumToProcess * 4;
+
             if (t_diff < 2000) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
                 continue;
             }
 
-            audio.get(2000, pcmf32_new);
+            // audio.get(TotalSamples, pcmf32_new);
+
+            // std::vector<int16_t> pcmi16(pcmf32_new.size());
+            // for (size_t i = 0; i < pcmf32_new.size(); ++i) {
+            //     pcmi16[i] = int16_t(pcmf32_new[i] * 32767);
+            // }
+
+            // printf("VAD\n");
+
+
+            // bool fVadDetectedVoice = false;
+            // for(int i = 0; i < TotalSamples; i += NumToProcess) {
+            //     int32_t frame = fvad_process(vad, pcmi16.data() + i, NumToProcess);
+            //     if (frame == -1) {
+            //         fprintf(stderr, "%s: failed to process audio\n", __func__);
+            //         exit(1);
+            //     }
+            //     fVadDetectedVoice |= static_cast<bool>(frame);
+            // }
+
+            // if (fVadDetectedVoice) {     
+            //     audio.get(params.length_ms, pcmf32);
+            // } else {
+            //     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            //     continue;
+            // }
 
             if (::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false)) {
                 audio.get(params.length_ms, pcmf32);
@@ -401,36 +399,13 @@ int main(int argc, char ** argv) {
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
 
+                    if(params.remote) {
+                        build_and_send_message(producer, params.topic, text);
+                    }
+
                     if (params.no_timestamps) {
                         printf("%s", text);
                         fflush(stdout);
-
-                        const std::string text_str = text;
-                        std::string utf8_text = text_str;
-
-                        char hostname[128];
-                        gethostname(hostname, sizeof(hostname));
-
-                        std::string hostname_str = hostname;
-
-                        json j;
-                        j["hostname"] = hostname_str;
-                        j["location"] = "Crolard Office";
-                        j["timestamp"] = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-                        j["text"] = utf8_text;
-
-                        // dump to utf-8
-                        std::string json_str = j.dump();
-
-                        const std::string key = "test";
-
-                        if (rd_kafka_produce(rkt, RD_KAFKA_PARTITION_UA,
-                                            RD_KAFKA_MSG_F_COPY,
-                                (void*)json_str.c_str(), json_str.size(),
-                                            key.c_str(), key.size(),
-                        NULL) == -1) {
-                            printf("Error\n");
-                        }
 
                         if (params.fname_out.length() > 0) {
                             fout << text;
@@ -453,6 +428,10 @@ int main(int argc, char ** argv) {
                         if (params.fname_out.length() > 0) {
                             fout << output;
                         }
+                    }
+
+                    if(params.remote) {
+                        producer->poll(0);
                     }
                 }
 
@@ -493,11 +472,14 @@ int main(int argc, char ** argv) {
 
     audio.pause();
 
-    rd_kafka_topic_destroy(rkt);
-    rd_kafka_destroy(rk);
+    if(params.remote) {
+        terminate_producer(producer);
+    }
 
     whisper_print_timings(ctx);
     whisper_free(ctx);
+
+    fvad_free(vad);
 
     return 0;
 }

@@ -60,3 +60,11 @@ make: *** [<builtin>: stream] Error 1
 ## Web version
 
 This tool can also run in the browser: [examples/stream.wasm](/examples/stream.wasm)
+
+
+## Example
+
+```bash
+./stream -m models/ggml-base.bin --step 0 --length 3000 -t 16 --language fr --capture 3 -vth 1.2 --remote
+./stream2 -C -t records-topic -b aci.crolard.fr:9092 -o beginning -p 0 
+```
