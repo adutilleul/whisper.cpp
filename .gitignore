@@ -21,6 +21,7 @@ build-*/
 
 /main
 /stream
+/stream2
 /command
 /talk
 /talk-llama

@@ -283,7 +283,7 @@ ifdef WHISPER_SERVER_SSL
 	MK_LDFLAGS  += -lssl -lcrypto
 endif
 
-MK_LDFLAGS += -lrdkafka -lrdkafka++ -Llibfvad/src/.libs -lfvad
+MK_LDFLAGS += -lrdkafka -lrdkafka++ -lonnxruntime
 
 ifdef WHISPER_DISABLE_LOGS
 	MK_CPPFLAGS += -DLOG_DISABLE_LOGS
@@ -1065,13 +1065,13 @@ command: examples/command/command.cpp \
 
 stream: examples/stream/stream.cpp \
 	$(OBJ_GGML) $(OBJ_WHISPER) $(OBJ_COMMON) $(OBJ_SDL)
-	$(CXX) -Iexamples/stream/modern-cpp-kafka/include -Ilibfvad/include $(CXXFLAGS) $(CFLAGS_SDL) -c $< -o $(call GET_OBJ_FILE, $<)
-	$(CXX) -Iexamples/stream/modern-cpp-kafka/include -Ilibfvad/include $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS) $(LDFLAGS_SDL)
+	$(CXX) $(CXXFLAGS) $(CFLAGS_SDL) -c $< -o $(call GET_OBJ_FILE, $<)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS) $(LDFLAGS_SDL)
 
 stream2: examples/stream/stream2.cpp \
 	$(OBJ_GGML) $(OBJ_WHISPER) $(OBJ_COMMON) $(OBJ_SDL)
-	$(CXX) -Iexamples/stream/modern-cpp-kafka/include $(CXXFLAGS) $(CFLAGS_SDL) -c $< -o $(call GET_OBJ_FILE, $<)
-	$(CXX) -Iexamples/stream/modern-cpp-kafka/include $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS) $(LDFLAGS_SDL)
+	$(CXX) $(CXXFLAGS) $(CFLAGS_SDL) -c $< -o $(call GET_OBJ_FILE, $<)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS) $(LDFLAGS_SDL)
 
 
 lsp: examples/lsp/lsp.cpp \

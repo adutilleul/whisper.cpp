@@ -18,10 +18,7 @@
 
 #include "protocol.hpp"
 
-#include "vad_iterator.hpp"
-
-constexpr int64_t VAD_WINDOW_SIZE = 2048;
-constexpr size_t VAD_TEST_FRAME_MS = 512;
+#include "fvad.h"
 
 // command-line parameters
 struct whisper_params {
@@ -134,7 +131,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    VadIterator small_vad("silero_vad.onnx", WHISPER_SAMPLE_RATE, VAD_TEST_FRAME_MS, params.vad_thold);
+    Fvad* vad = fvad_new();
+    fvad_set_sample_rate(vad, WHISPER_SAMPLE_RATE);
 
     params.keep_ms   = std::min(params.keep_ms,   params.step_ms);
     params.length_ms = std::max(params.length_ms, params.step_ms);
@@ -261,11 +259,6 @@ int main(int argc, char ** argv) {
             break;
         }
 
-
-        if(params.remote) {
-            producer->poll(0);
-        }
-
         // process new audio
 
         if (!use_vad) {
@@ -306,32 +299,51 @@ int main(int argc, char ** argv) {
             const auto t_now  = std::chrono::high_resolution_clock::now();
             const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
 
-            if (t_diff < VAD_WINDOW_SIZE) {
+            int32_t ValidLength = 30;
+            int32_t NumToProcess = ValidLength * WHISPER_SAMPLE_RATE / 1000;
+            int32_t TotalSamples = NumToProcess * 4;
+
+            if (t_diff < TotalSamples) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
                 continue;
             }
 
-            audio.get(VAD_WINDOW_SIZE, pcmf32_new);
+            audio.get(TotalSamples, pcmf32_new);
 
-            const int test_samples  = VAD_TEST_FRAME_MS * WHISPER_SAMPLE_RATE / 1000;
-            std::vector<float> inferences;
-            for (int j = 0; j < VAD_WINDOW_SIZE; j += test_samples)
-            {
-                std::vector<float> r{&pcmf32_new[0] + j, &pcmf32_new[0] + j + test_samples};
-                small_vad.reset_states();
-                small_vad.predict(r);
-                inferences.push_back(small_vad.get_output());
+            // audio.get(TotalSamples, pcmf32_new);
+
+            std::vector<int16_t> pcmi16(pcmf32_new.size());
+            for (size_t i = 0; i < pcmf32_new.size(); ++i) {
+                pcmi16[i] = int16_t(pcmf32_new[i] * 32767);
             }
 
-            float inference_avg = 0;
-            for (float inf : inferences)
-                inference_avg = inference_avg + inf;
-            inference_avg = inference_avg / inferences.size();
+            // printf("VAD\n");
 
-            bool vad_output = inference_avg > params.vad_thold;
-            //bool vad_simple = ::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false);
 
-            if (vad_output) {
+            bool fVadDetectedVoice = false;
+            for(int i = 0; i < TotalSamples; i += NumToProcess) {
+                int32_t frame = fvad_process(vad, pcmi16.data() + i, NumToProcess);
+                if (frame == -1) {
+                    fprintf(stderr, "%s: failed to process audio\n", __func__);
+                    exit(1);
+                }
+                fVadDetectedVoice |= static_cast<bool>(frame);
+            }
+
+            bool simple = ::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false);
+            bool fvad = simple;
+
+            // if (fVadDetectedVoice) {     
+            //     audio.get(params.length_ms, pcmf32);
+            // } else {
+            //     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            //     continue;
+            // }
+
+            printf("VAD: %d, Simple: %d\n", fvad, simple);
+
+            if (fVadDetectedVoice) {
                 audio.get(params.length_ms, pcmf32);
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -394,8 +406,7 @@ int main(int argc, char ** argv) {
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
 
-                    const char first_character = text[0];
-                    if(params.remote && first_character != '[') {
+                    if(params.remote) {
                         build_and_send_message(producer, params.topic, text);
                     }
 
@@ -474,6 +485,8 @@ int main(int argc, char ** argv) {
 
     whisper_print_timings(ctx);
     whisper_free(ctx);
+
+    fvad_free(vad);
 
     return 0;
 }
