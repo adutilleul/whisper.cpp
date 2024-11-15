@@ -283,7 +283,7 @@ ifdef WHISPER_SERVER_SSL
 	MK_LDFLAGS  += -lssl -lcrypto
 endif
 
-MK_LDFLAGS += -lrdkafka -lrdkafka++ -lonnxruntime
+MK_LDFLAGS += -lrdkafka -lrdkafka++ -lonnxruntime -lcurl
 
 ifdef WHISPER_DISABLE_LOGS
 	MK_CPPFLAGS += -DLOG_DISABLE_LOGS

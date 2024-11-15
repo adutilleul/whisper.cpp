@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <limits.h>
 
+#include <chrono>
+#include <format>
+
 const std::string DEFAULT_BOOTSTRAP_SERVERS = "aci.crolard.fr:9092";
 const std::string DEFAULT_KAFKA_TOPIC = "records-topic";
 
@@ -66,19 +69,13 @@ void producer_send_message(RdKafka::Producer* producer, const std::string& json_
         } // A producer application should continually serve the delivery report queue // by calling poll() at frequent intervals. producer->poll(0);
 }
 
-void build_and_send_message(RdKafka::Producer* producer, const std::string& topic, const char* text) {
+void build_and_send_message(RdKafka::Producer* producer, const std::string& topic, const char* text, const int32_t node_id) {
     const std::string text_str = text;
 
-    char hostname[HOST_NAME_MAX];
-    char username[LOGIN_NAME_MAX];
-    gethostname(hostname, HOST_NAME_MAX);
-    getlogin_r(username, LOGIN_NAME_MAX);
-
-
     json j;
-    j["user"] = std::string(username);
-    j["hostname"] = std::string(hostname);
-    j["timestamp"] = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    const auto now = std::chrono::system_clock::now();
+    j["node_id"] = node_id;
+    j["timestamp"] = std::format("{:%FT%TZ}", now);
     j["text"] = text_str;
 
     std::string json_str = j.dump();

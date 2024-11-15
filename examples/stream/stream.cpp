@@ -15,12 +15,15 @@
 #include <vector>
 #include <tuple>
 #include <fstream>
+#include <thread>
+
+#include <curl/curl.h>
 
 #include "protocol.hpp"
 
 #include "vad_iterator.hpp"
 
-constexpr int64_t VAD_WINDOW_SIZE = 2048;
+constexpr int64_t VAD_WINDOW_SIZE = 1536;
 constexpr size_t VAD_TEST_FRAME_MS = 512;
 
 // command-line parameters
@@ -47,8 +50,11 @@ struct whisper_params {
     bool flash_attn    = false;
     bool remote        = false;
 
+    int32_t id = 0;
+
     std::string language  = "en";
     std::string model     = "models/ggml-base.en.bin";
+    std::string location = "41.40338,2.17403";
     std::string bootstrap_servers = DEFAULT_BOOTSTRAP_SERVERS;
     std::string topic = DEFAULT_KAFKA_TOPIC;
     std::string fname_out;
@@ -87,6 +93,8 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-sa"   || arg == "--save-audio")    { params.save_audio    = true; }
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
         else if (arg == "-fa"   || arg == "--flash-attn")    { params.flash_attn    = true; }
+        else if (arg == "-loc"  || arg == "--location")      { params.location      = argv[++i]; }
+        else if (arg == "-id"   || arg == "--id")            { params.id            = std::stoi(argv[++i]); }
 
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
@@ -125,6 +133,29 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -ng,      --no-gpu        [%-7s] disable GPU inference\n",                          params.use_gpu ? "false" : "true");
     fprintf(stderr, "  -fa,      --flash-attn    [%-7s] flash attention during inference\n",               params.flash_attn ? "true" : "false");
     fprintf(stderr, "\n");
+}
+
+bool send_webhook_request(const std::string &node_id, const std::string &data) {
+    CURL *curl;
+    CURLcode res;
+    std::string url = "https://aci.crolard.fr/api/webhook/" + node_id + "/" + data;
+
+    curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        res = curl_easy_perform(curl);
+        if (res != CURLE_OK) {
+            return false;
+        } else {
+            return true;
+        }
+
+        curl_easy_cleanup(curl);
+    } else {
+        return false;
+    }
 }
 
 int main(int argc, char ** argv) {
@@ -249,6 +280,19 @@ int main(int argc, char ** argv) {
     auto t_last  = std::chrono::high_resolution_clock::now();
     const auto t_start = t_last;
 
+
+    std::thread aliveThread([&]{      
+        while(true) {      
+            json data;
+            data["localisation"] = params.location;
+            // escape the string to it can be sent on a URL
+            std::string json = data.dump();
+            std::string escaped = curl_easy_escape(nullptr, json.c_str(), json.size());
+            send_webhook_request(std::to_string(params.id), escaped);
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+        }
+    });
+
     // main audio loop
     while (is_running) {
         if (params.save_audio) {
@@ -260,7 +304,6 @@ int main(int argc, char ** argv) {
         if (!is_running) {
             break;
         }
-
 
         if(params.remote) {
             producer->poll(0);
@@ -307,7 +350,7 @@ int main(int argc, char ** argv) {
             const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
 
             if (t_diff < VAD_WINDOW_SIZE) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
 
@@ -329,13 +372,11 @@ int main(int argc, char ** argv) {
             inference_avg = inference_avg / inferences.size();
 
             bool vad_output = inference_avg > params.vad_thold;
-            //bool vad_simple = ::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false);
 
             if (vad_output) {
                 audio.get(params.length_ms, pcmf32);
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
 
@@ -394,9 +435,8 @@ int main(int argc, char ** argv) {
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
 
-                    const char first_character = text[0];
-                    if(params.remote && first_character != '[') {
-                        build_and_send_message(producer, params.topic, text);
+                    if(params.remote) {
+                        build_and_send_message(producer, params.topic, text, params.id);
                     }
 
                     if (params.no_timestamps) {
