@@ -135,6 +135,11 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "\n");
 }
 
+size_t write_data(void *buffer, size_t size, size_t nmemb, void *userp)
+{
+   return size * nmemb;
+}
+
 bool send_webhook_request(const std::string &node_id, const std::string &data) {
     CURL *curl;
     CURLcode res;
@@ -144,7 +149,7 @@ bool send_webhook_request(const std::string &node_id, const std::string &data) {
     if (curl) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
         res = curl_easy_perform(curl);
         if (res != CURLE_OK) {
             return false;
