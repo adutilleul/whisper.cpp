@@ -25,6 +25,7 @@
 
 constexpr int64_t VAD_WINDOW_SIZE = 1536;
 constexpr size_t VAD_TEST_FRAME_MS = 512;
+constexpr size_t DELAY_HEARTBEAT_S = 10;
 
 // command-line parameters
 struct whisper_params {
@@ -294,7 +295,7 @@ int main(int argc, char ** argv) {
             std::string json = data.dump();
             std::string escaped = curl_easy_escape(nullptr, json.c_str(), json.size());
             send_webhook_request(std::to_string(params.id), escaped);
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::this_thread::sleep_for(std::chrono::seconds(DELAY_HEARTBEAT_S));
         }
     });
 
